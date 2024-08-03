@@ -2,36 +2,64 @@
 
 # Прекращаем выполнение скрипта при ошибке
 set -e
+#!/bin/bash
 
-# Проверка наличия Docker
-if ! command -v docker &> /dev/null; then
-    echo "Ошибка: Docker не установлен. Пожалуйста, установите Docker и повторите попытку."
-    exit 1
+# Функция для проверки наличия команды
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Проверка установки Docker
+if ! command_exists docker; then
+    echo "Docker не установлен. Устанавливаем Docker..."
+    sudo apt-get update
+    sudo apt-get install -y \
+        ca-certificates \
+        curl \
+        gnupg \
+        lsb-release
+
+    sudo mkdir -p /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+      $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+    sudo apt-get update
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+else
+    echo "Docker уже установлен."
 fi
 
-# Проверка наличия Docker Compose
-if ! command -v docker-compose &> /dev/null; then
-    echo "Ошибка: Docker Compose не установлен. Пожалуйста, установите Docker Compose и повторите попытку."
-    exit 1
+# Проверка установки Docker Compose
+if ! command_exists docker-compose; then
+    echo "Docker Compose не установлен. Устанавливаем Docker Compose..."
+    sudo curl -L "https://github.com/docker/compose/releases/download/$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep -Po '"tag_name": "\K.*?(?=")')/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
+else
+    echo "Docker Compose уже установлен."
 fi
 
 # Запрос данных у пользователя
-read -p "Введите ваш домен (YOUR-DOMAIN): " DOMAIN
-read -p "Введите имя пользователя CouchDB (YOUR-USER): " USER
-read -sp "Введите пароль пользователя CouchDB (YOUR-PASS): " PASS
+read -p "Enter your DOMAIN: " DOMAIN
+read -p "Enter username CouchDB: " USER
+read -sp "Enter password CouchDB: " PASS
 echo
 
 # Создание необходимых директорий и файлов
-mkdir -p couchdb/certbot/conf couchdb/certbot/www/.well-known/acme-challenge couchdb/data couchdb/conf
+mkdir -p /opt/LiveSync-CouchDB/nginx/www/$DOMAIN/.well-known/acme-challenge/ /opt/LiveSync-CouchDB/nginx/certbot /opt/LiveSync-CouchDB/couchdb/data /opt/LiveSync-CouchDB/couchdb/conf
 
 # Создание файла nginx.conf до получения SSL
-cat <<EOL > couchdb/nginx.conf
+cat <<EOL > /opt/LiveSync-CouchDB/nginx/nginx.conf
 server {
     listen 80;
     server_name $DOMAIN;
 
+    root /var/www/$DOMAIN;
+	
     location /.well-known/acme-challenge/ {
-        root /var/www/html;
+        root /var/www/$DOMAIN;
         allow all;
     }
 
@@ -46,7 +74,7 @@ server {
 EOL
 
 # Создание файла docker-compose.yml
-cat <<EOL > couchdb/docker-compose.yml
+cat <<EOL > /opt/LiveSync-CouchDB/docker-compose.yml
 version: '3.1'
 
 services:
@@ -60,8 +88,8 @@ services:
       - COUCHDB_USER=$USER
       - COUCHDB_PASSWORD=$PASS
     volumes:
-      - ./data/couchdb:/opt/couchdb/data
-      - ./conf/local.ini:/opt/couchdb/etc/local.ini
+      - /opt/LiveSync-CouchDB/couchdb/data/:/opt/couchdb/data
+      - /opt/LiveSync-CouchDB/couchdb/conf/local.ini:/opt/couchdb/etc/local.ini
 
   nginx:
     image: nginx:latest
@@ -71,9 +99,9 @@ services:
       - 80:80
       - 443:443
     volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/html
+      - /opt/LiveSync-CouchDB/nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+      - /opt/LiveSync-CouchDB/nginx/certbot/conf:/etc/letsencrypt
+      - /opt/LiveSync-CouchDB/nginx/www:/var/www/
     depends_on:
       - couchdb
 
@@ -82,23 +110,23 @@ services:
     container_name: certbot
     restart: always
     volumes:
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/html
-    entrypoint: /bin/sh -c 'trap exit TERM; while :; do sleep 6h & wait \$${!}; certbot renew; done'
+      - /opt/LiveSync-CouchDB/nginx/certbot/conf:/etc/letsencrypt
+      - /opt/LiveSync-CouchDB/nginx/www:/var/www/
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do sleep 6h & wait $${!}; certbot renew; done'
 EOL
 
 # Создание файла local.ini
-cat <<EOL > couchdb/conf/local.ini
+cat <<EOL > /opt/LiveSync-CouchDB/couchdb/conf/local.ini
 [couchdb]
 single_node=true
 max_document_size = 50000000
 
 [chttpd]
-require_valid_user = true
+require_valid_admin = true
 max_http_request_size = 4294967296
 
 [chttpd_auth]
-require_valid_user = true
+require_valid_admin = true
 authentication_redirect = /_utils/session.html
 
 [httpd]
@@ -114,26 +142,28 @@ max_age = 3600
 EOL
 
 # Запуск nginx перед получением SSL сертификата
-cd couchdb
+cd /opt/LiveSync-CouchDB/
 docker-compose up -d nginx
 
 # Получение SSL сертификата
 docker run -it --rm \
-  -v $(pwd)/couchdb/certbot/conf:/etc/letsencrypt \
-  -v $(pwd)/couchdb/certbot/www:/var/www/html \
-  certbot/certbot certonly --dry-run \
-  --webroot-path=/var/www/html \
+-v /opt/LiveSync-CouchDB/nginx/certbot/conf:/etc/letsencrypt \
+  -v /opt/LiveSync-CouchDB/nginx/www/$DOMAIN:/var/www/$DOMAIN \
+  certbot/certbot certonly --webroot \
+  -w /var/www/$DOMAIN \
   -d $DOMAIN
 
 # Проверка успешности получения сертификата
-if [ -d "couchdb/certbot/conf/live/$DOMAIN" ]; then
+if [ -d "/opt/LiveSync-CouchDB/nginx/certbot/conf/live/$DOMAIN" ]; then
     echo "SSL сертификат успешно получен. Добавляем конфигурацию SSL в nginx.conf."
 
-    cat <<EOL >> couchdb/nginx.conf
+    cat <<EOL >> /opt/LiveSync-CouchDB/nginx/nginx.conf
 
 server {
     listen 443 ssl;
     server_name $DOMAIN;
+
+    root /var/www/$DOMAIN;
 
     ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
@@ -163,7 +193,7 @@ else
 fi
 
 # Запуск docker-compose
-cd couchdb
+cd /opt/LiveSync-CouchDB/
 docker-compose up --build -d
 
 echo "Скрипт успешно выполнен."
