@@ -12,3 +12,35 @@
 - [x] Запрос доменного имени. (Реализация через ```localhost``` пока не настроена, да и не вижу в этом смысла, т.к. для синхронизации на смартфонах требуется SSL)
 - [x] Запрос выбора ```HTTP``` или ```HTTPS```.
 - [x] Запрос интервала проверки SSL сертификата. (Интервал указывается в часах - к сожалению пока не тестировалось обновление) 
+
+
+### Учётные записи CouchDB
+
+Для авторизации в [LiveSync-Obsidian](https://github.com/vrtmrz/obsidian-livesync) вы можете использовать суперпользователя, которого создавали при выполнелнении [setup.sh](https://github.com/CoplandTech/LiveSyncObsidian--CouchDB_Nginx_Certbot/blob/main/setup.sh), но в таком случае при указании ```базы данных``` в настройках плагина Вы будете создавать новые БД без чёткого разделения: Пользователь - База.
+
+#### Настройка CouchDB с помощью CMD Windows
+| Переменная | Описание : Значение |
+| ------------- | ------------- |
+| URL_COUCHDB | Адрес вашей установки CouchDB : example.com |
+| ADMIN_USER | Имя администратора !!Регистр важен!!, созданого при выполнении [setup.sh](https://github.com/CoplandTech/LiveSyncObsidian--CouchDB_Nginx_Certbot/blob/main/setup.sh) : Admin |
+| ADMIN_PASS | Пароль администратора, созданого при выполнении [setup.sh](https://github.com/CoplandTech/LiveSyncObsidian--CouchDB_Nginx_Certbot/blob/main/setup.sh) : 1q2w3e |
+| USER_NAME | Желаемое имя пользователя : Test1 |
+| USER_PASS | Желаемый пароль пользователя : PaSsWoRd |
+| DATA_BASE | Имя Базы Данных : sync_test1 |
+
+1. Созадть пользователя:
+```cmd
+curl -X PUT https://ADMIN_USER:ADMIN_PASS@URL_COUCHDB/_users/org.couchdb.user:USER_NAME -H "Content-Type: application/json" -d "{\"name\": \"USER_NAME\", \"password\": \"USER_PASS\", \"roles\": [], \"type\": \"user\"}"
+```
+
+2. Создать базу данных пользователя:
+```cmd
+curl -X PUT https://ADMIN_USER:ADMIN_PASS@URL_COUCHDB/DATA_BASE
+```
+
+3. Назначить права доступа к БД:
+В примере: Пользователь - Администратор БД
+```cmd
+curl -X PUT https://ADMIN_USER:ADMIN_PASS@URL_COUCHDB/DATA_BASE/_security -H "Content-Type: application/json" -d "{\"admins\": {\"names\": [\"USER_NAME\"],\"roles\": []}}"
+``` 
+ 
