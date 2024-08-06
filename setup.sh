@@ -2,7 +2,12 @@
 
 # Прекращаем выполнение скрипта при ошибке
 set -e
-#!/bin/bash
+
+# Проверка наличия sudo прав
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run as root or use sudo"
+  exit 1
+fi
 
 # Функция для проверки наличия команды
 command_exists() {
@@ -11,7 +16,7 @@ command_exists() {
 
 # Проверка установки Docker
 if ! command_exists docker; then
-    echo "Docker не установлен. Устанавливаем Docker..."
+    echo "Docker is not installed. Installing Docker..."
     sudo apt-get update
     sudo apt-get install -y \
         ca-certificates \
@@ -29,35 +34,37 @@ if ! command_exists docker; then
     sudo apt-get update
     sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 else
-    echo "Docker уже установлен."
+    echo "Docker is already installed."
 fi
 
 # Проверка установки Docker Compose
 if ! command_exists docker-compose; then
-    echo "Docker Compose не установлен. Устанавливаем Docker Compose..."
+    echo "Docker Compose is not installed. Installing Docker Compose..."
     sudo curl -L "https://github.com/docker/compose/releases/download/$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep -Po '"tag_name": "\K.*?(?=")')/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
     sudo chmod +x /usr/local/bin/docker-compose
 else
-    echo "Docker Compose уже установлен."
+    echo "Docker Compose is already installed."
 fi
 
 # Запрос данных у пользователя
-read -p "Enter your DOMAIN: " DOMAIN
 read -p "Enter username CouchDB: " USER
 read -sp "Enter password CouchDB: " PASS
 echo
+read -p "Enter the full path (/DIR_PATH/LiveSync-CouchDB/) to the directory: " DIR_PATH
+read -p "Enter your DOMAIN: " DOMAIN
+read -p "Do you want to set up SSL? (yes/no): " SSL_SETUP
 
 # Создание необходимых директорий и файлов
-mkdir -p /opt/LiveSync-CouchDB/nginx/www/$DOMAIN/.well-known/acme-challenge/ /opt/LiveSync-CouchDB/nginx/certbot /opt/LiveSync-CouchDB/couchdb/data /opt/LiveSync-CouchDB/couchdb/conf
+mkdir -p $DIR_PATH/LiveSync-CouchDB/nginx/www/$DOMAIN/.well-known/acme-challenge/ $DIR_PATH/LiveSync-CouchDB/nginx/certbot $DIR_PATH/LiveSync-CouchDB/couchdb/data $DIR_PATH/LiveSync-CouchDB/couchdb/conf
 
 # Создание файла nginx.conf до получения SSL
-cat <<EOL > /opt/LiveSync-CouchDB/nginx/nginx.conf
+cat <<EOL > $DIR_PATH/LiveSync-CouchDB/nginx/nginx.conf
 server {
     listen 80;
     server_name $DOMAIN;
 
     root /var/www/$DOMAIN;
-	
+    
     location /.well-known/acme-challenge/ {
         root /var/www/$DOMAIN;
         allow all;
@@ -74,7 +81,7 @@ server {
 EOL
 
 # Создание файла docker-compose.yml
-cat <<EOL > /opt/LiveSync-CouchDB/docker-compose.yml
+cat <<EOL > $DIR_PATH/LiveSync-CouchDB/docker-compose.yml
 version: '3.1'
 
 services:
@@ -88,8 +95,8 @@ services:
       - COUCHDB_USER=$USER
       - COUCHDB_PASSWORD=$PASS
     volumes:
-      - /opt/LiveSync-CouchDB/couchdb/data/:/opt/couchdb/data
-      - /opt/LiveSync-CouchDB/couchdb/conf/local.ini:/opt/couchdb/etc/local.ini
+      - $DIR_PATH/LiveSync-CouchDB/couchdb/data/:/opt/couchdb/data
+      - $DIR_PATH/LiveSync-CouchDB/couchdb/conf/local.ini:/opt/couchdb/etc/local.ini
 
   nginx:
     image: nginx:latest
@@ -99,24 +106,30 @@ services:
       - 80:80
       - 443:443
     volumes:
-      - /opt/LiveSync-CouchDB/nginx/nginx.conf:/etc/nginx/conf.d/default.conf
-      - /opt/LiveSync-CouchDB/nginx/certbot/conf:/etc/letsencrypt
-      - /opt/LiveSync-CouchDB/nginx/www:/var/www/
+      - $DIR_PATH/LiveSync-CouchDB/nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+      - $DIR_PATH/LiveSync-CouchDB/nginx/certbot/conf:/etc/letsencrypt
+      - $DIR_PATH/LiveSync-CouchDB/nginx/www:/var/www/
     depends_on:
       - couchdb
 
+EOL
+
+# Добавляем certbot сервис только если SSL_SETUP равно "yes"
+if [ "$SSL_SETUP" == "yes" ]; then
+    cat <<EOL >> $DIR_PATH/LiveSync-CouchDB/docker-compose.yml
   certbot:
     image: certbot/certbot
     container_name: certbot
     restart: always
     volumes:
-      - /opt/LiveSync-CouchDB/nginx/certbot/conf:/etc/letsencrypt
-      - /opt/LiveSync-CouchDB/nginx/www:/var/www/
+      - $DIR_PATH/LiveSync-CouchDB/nginx/certbot/conf:/etc/letsencrypt
+      - $DIR_PATH/LiveSync-CouchDB/nginx/www:/var/www/
     entrypoint: /bin/sh -c 'trap exit TERM; while :; do sleep 6h & wait $${!}; certbot renew; done'
 EOL
+fi
 
 # Создание файла local.ini
-cat <<EOL > /opt/LiveSync-CouchDB/couchdb/conf/local.ini
+cat <<EOL > $DIR_PATH/LiveSync-CouchDB/couchdb/conf/local.ini
 [couchdb]
 single_node=true
 max_document_size = 50000000
@@ -142,22 +155,48 @@ max_age = 3600
 EOL
 
 # Запуск nginx перед получением SSL сертификата
-cd /opt/LiveSync-CouchDB/
+cd $DIR_PATH/LiveSync-CouchDB/
 docker-compose up -d nginx
 
-# Получение SSL сертификата
-docker run -it --rm \
--v /opt/LiveSync-CouchDB/nginx/certbot/conf:/etc/letsencrypt \
-  -v /opt/LiveSync-CouchDB/nginx/www/$DOMAIN:/var/www/$DOMAIN \
-  certbot/certbot certonly --webroot \
-  -w /var/www/$DOMAIN \
-  -d $DOMAIN
+if [ "$SSL_SETUP" == "yes" ]; then
+    read -p "How many hours between SSL checks? (e.g., 24 for 1 day, 168 for 7 days, 336 for 14 days): " SSL_HOURS
 
-# Проверка успешности получения сертификата
-if [ -d "/opt/LiveSync-CouchDB/nginx/certbot/conf/live/$DOMAIN" ]; then
-    echo "SSL сертификат успешно получен. Добавляем конфигурацию SSL в nginx.conf."
+    docker run -it --rm \
+    -v $DIR_PATH/LiveSync-CouchDB/nginx/certbot/conf:/etc/letsencrypt \
+    -v $DIR_PATH/LiveSync-CouchDB/nginx/www/$DOMAIN:/var/www/$DOMAIN \
+    certbot/certbot certonly --webroot \
+    -w /var/www/$DOMAIN \
+    -d $DOMAIN
 
-    cat <<EOL >> /opt/LiveSync-CouchDB/nginx/nginx.conf
+    # Проверка успешности получения сертификата
+    if [ -d "$DIR_PATH/LiveSync-CouchDB/nginx/certbot/conf/live/$DOMAIN" ]; then
+        echo "The SSL certificate has been successfully received. Adding the SSL configuration to nginx.conf."
+
+        # Очистка файла nginx.conf
+        > $DIR_PATH/LiveSync-CouchDB/nginx/nginx.conf
+
+        cat <<EOL >> $DIR_PATH/LiveSync-CouchDB/nginx/nginx.conf
+
+server {
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://$host$request_uri;
+
+    root /var/www/$DOMAIN;
+    
+    location /.well-known/acme-challenge/ {
+        root /var/www/$DOMAIN;
+        allow all;
+    }
+
+    location / {
+        proxy_pass http://couchdb:5984;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
 
 server {
     listen 443 ssl;
@@ -186,14 +225,26 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
+
 EOL
-else
-    echo "Ошибка: SSL сертификат не был получен."
-    exit 1
+        # Перезапуск nginx
+        docker-compose restart nginx
+    else
+        echo "Error: The SSL certificate was not received."
+        echo "The contents of the directory $DIR_PATH/LiveSync-CouchDB/nginx/certbot/conf:"
+        ls -la $DIR_PATH/LiveSync-CouchDB/nginx/certbot/conf
+        exit 1
+    fi
+
+    # Обновление интервала проверки SSL
+    sed -i "s/sleep 6h/sleep ${SSL_HOURS}h/" $DIR_PATH/LiveSync-CouchDB/docker-compose.yml
 fi
 
-# Запуск docker-compose
-cd /opt/LiveSync-CouchDB/
-docker-compose up --build -d
+# Запуск docker-compose без certbot, если SSL_SETUP равно "no"
+if [ "$SSL_SETUP" == "no" ]; then
+    docker-compose up --build -d couchdb nginx
+else
+    docker-compose up --build -d
+fi
 
-echo "Скрипт успешно выполнен."
+echo "The script was executed successfully."
